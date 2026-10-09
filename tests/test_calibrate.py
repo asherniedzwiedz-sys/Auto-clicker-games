@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from idleclicker.backend import Rect
+from idleclicker.backend import Rect, WindowInfo
 from idleclicker.calibrate import CalibrationError, Calibrator
 from idleclicker.config import load_config, save_config
 
@@ -80,6 +80,20 @@ class CalibrationTests(unittest.TestCase):
         cal.calibrate(self.path)
         self.assertIn("wasn't on the game", self.io.text)
         self.assertEqual(load_config(self.path).businesses[0].tile, (50, 510))
+
+    def test_rejects_taskbar_and_untitled_windows(self):
+        self.backend.windows[3] = WindowInfo(3, "", "Shell_TrayWnd")
+        self.backend.rects[3] = Rect(0, 1020, 1920, 60)
+        self.backend.windows[4] = WindowInfo(4, "", "SomeOverlay")
+        self.backend.rects[4] = Rect(1000, 600, 200, 200)
+        self.queue_clicks((500, 1050),              # taskbar button: rejected
+                          (1100, 700),              # untitled window: rejected
+                          (500, 300),               # the game
+                          (150, 560), (350, 580))
+        self.calibrator(["y", "", "Oil", "", "n"]).calibrate(self.path)
+        self.assertIn("taskbar", self.io.text)
+        self.assertIn("no title", self.io.text)
+        self.assertEqual(load_config(self.path).window_title, "Example Clicker")
 
     def test_title_must_be_part_of_window_title(self):
         self.queue_clicks((500, 300), (150, 560), (350, 580))

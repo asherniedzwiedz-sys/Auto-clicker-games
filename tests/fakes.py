@@ -60,9 +60,8 @@ class FakeBackend:
     def window_at(self, x, y):
         if (x, y) in self.covered:
             return OTHER
-        for handle in (GAME, OTHER):
-            rect = self.rects.get(handle)
-            if handle in self.windows and rect and rect.contains(x, y):
+        for handle, rect in self.rects.items():
+            if handle in self.windows and rect.contains(x, y):
                 return handle
         return None
 

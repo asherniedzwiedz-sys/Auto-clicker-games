@@ -16,6 +16,8 @@ from .colors import distance
 from .config import Business, Config, ConfigError, load_config, save_config, to_screen
 
 HOVER_MARGIN_PX = 30
+# Windows' own taskbar and desktop windows: never the game.
+SHELL_WINDOW_CLASSES = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW"}
 
 
 class CalibrationError(Exception):
@@ -117,13 +119,22 @@ class Calibrator:
             return None
 
     def _pick_window(self) -> Tuple[WindowInfo, Tuple[int, int]]:
-        self.out("Step 1: click anywhere inside the game window.")
+        self.out("Step 1: bring the game to the front, then click anywhere on the game itself\n"
+                 "(not on its taskbar button).")
         while True:
             pos = self.wait_for_click()
             handle = self.backend.window_at(*pos)
             info = self.backend.window_info(handle) if handle else None
             if info is None:
                 self.out("  That isn't a window I can use (was it this console?). Click inside the game.")
+                continue
+            if info.class_name in SHELL_WINDOW_CLASSES:
+                self.out("  That was the taskbar or the desktop. Bring the game to the front, then\n"
+                         "  click on the game itself.")
+                continue
+            if not info.title.strip():
+                self.out("  That window has no title, so the bot couldn't find it again. Click on\n"
+                         "  the game itself.")
                 continue
             client = self.backend.client_rect(info.handle)
             if client is None or not client.contains(*pos):
