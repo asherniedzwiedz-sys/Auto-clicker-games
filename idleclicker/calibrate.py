@@ -9,13 +9,16 @@ from __future__ import annotations
 import dataclasses
 import time
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from .backend import RGB, Backend, Point, WindowInfo, find_window
 from .colors import distance
 from .config import Business, Config, ConfigError, load_config, save_config, to_screen
 
 HOVER_MARGIN_PX = 30
+COLOR_WAIT_SECONDS = 60     # how long to wait for the upgrade button to become visible
+COLOR_POLL_SECONDS = 0.1
+COLOR_SETTLE_SECONDS = 0.5  # let the game finish redrawing after it comes to the front
 # Windows' own taskbar and desktop windows: never the game.
 SHELL_WINDOW_CLASSES = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW"}
 
@@ -65,29 +68,19 @@ class Calibrator:
             "\n=== Calibration ===\n"
             "Before starting:\n"
             "  * Run the game in WINDOWED or borderless mode at the size you'll play at.\n"
-            "  * Put this console next to the game so you can read it while clicking.\n"
             "  * Your clicks go through to the game as normal: tapping a business is\n"
             "    harmless, and clicking an upgrade button may buy it.\n"
             "Press Ctrl+C at any time to cancel without changing anything.\n")
 
         window, size = self._pick_window()
         title = self._ask_title(window)
-        names = self._ask_names(previous)
+        name = self._ask_name(previous)
 
-        self.out("\nStep 3: you'll now click, in this order:")
-        for i, name in enumerate(names, 1):
-            self.out(f"  {2 * i - 1}. the business tile for '{name}'\n"
-                     f"  {2 * i}. the upgrade button for '{name}'")
-        self.out("Tip: click the middle of each button.\n")
-
-        businesses = []
-        for i, name in enumerate(names, 1):
-            tag = f"[{i}/{len(names)}]"
-            tile = self._capture(window.handle, size, f"{tag} Click the business TILE for '{name}'...")
-            upgrade = self._capture(window.handle, size, f"{tag} Click the UPGRADE button for '{name}'...")
-            old = _by_name(previous, name)
-            businesses.append(Business(name=name, tile=tile, upgrade=upgrade,
-                                       enabled=old.enabled if old else True))
+        self.out(f"\nStep 3: in the game, click '{name}' and then its upgrade button.\n"
+                 "Click the middle of each. You'll hear a beep after each one.")
+        tile = self._capture(window.handle, size, f"  1. Click the business TILE for '{name}' (the one to tap)...")
+        upgrade = self._capture(window.handle, size, f"  2. Click the UPGRADE button for '{name}'...")
+        businesses = [Business(name=name, tile=tile, upgrade=upgrade)]
 
         if previous is not None:
             config = dataclasses.replace(previous, window_title=title, window_class=window.class_name,
@@ -96,17 +89,13 @@ class Calibrator:
             config = Config(window_title=title, window_class=window.class_name,
                             client_size=size, businesses=businesses)
 
-        self.out("\nStep 4 (recommended): teach the bot what an AFFORDABLE upgrade button looks like.\n"
-                 "Without this it simply clicks the upgrade button every few seconds, which is\n"
-                 "harmless if the game ignores clicks on buttons you can't afford.")
-        if self.yes_no("Sample the button colours now?", True):
-            self.calibrate_colors(config)
+        self.out("\nStep 4 (recommended): the upgrade button's colour.")
+        self.calibrate_colors(config)
 
         backup = save_config(config, path)
         self.out(f"\nSaved {path}" + (f" (previous version kept as {backup.name})" if backup else "") + ".")
-        self.out("Next: run with --dry-run -v to check it, then run normally.\n"
-                 "To re-rank businesses later, reorder them in config.json (highest earner first)\n"
-                 'or set "enabled": false on ones you want skipped.')
+        self.out("Next: run 'Start Clicker' (or --dry-run -v first to check it).\n"
+                 "To switch to a different business later, just run Calibrate again.")
         return config
 
     def _load_previous(self, path: Path) -> Optional[Config]:
@@ -156,25 +145,11 @@ class Calibrator:
                 return title
             self.out(f"  '{title}' isn't part of '{window.title}'. Try again.")
 
-    def _ask_names(self, previous: Optional[Config]) -> List[str]:
-        self.out("\nStep 2: list the businesses for the bot to use, HIGHEST EARNER FIRST.\n"
-                 "The bot always works on the first one in the list (skipping any you disable).")
-        if previous is not None and previous.businesses:
-            self.out("Current list: " + ", ".join(b.name for b in previous.businesses))
-            if self.yes_no("Keep this list and order?", True):
-                return [b.name for b in previous.businesses]
-        self.out("Type one name per line, then press Enter on an empty line to finish.")
-        names: List[str] = []
-        while True:
-            name = self.ask(f"  {len(names) + 1}. ").strip()
-            if not name:
-                if names:
-                    return names
-                self.out("  Enter at least one business.")
-            elif name.casefold() in (n.casefold() for n in names):
-                self.out("  Already listed.")
-            else:
-                names.append(name)
+    def _ask_name(self, previous: Optional[Config]) -> str:
+        self.out("\nStep 2: which business should the bot tap and upgrade? Pick your best earner.\n"
+                 "The name is just a label for you; it doesn't have to match the game.")
+        default = previous.businesses[0].name if previous is not None and previous.businesses else "My business"
+        return self.ask(f"Business name [Enter = '{default}']: ").strip() or default
 
     def _capture(self, handle: int, size: Tuple[int, int], prompt: str) -> Point:
         self.out(prompt)
@@ -197,75 +172,88 @@ class Calibrator:
     # ------------------------------------------------------------ colours
 
     def calibrate_colors(self, config: Config) -> None:
-        """Sample upgrade (and optionally tile) colours for each business, in place."""
+        """Sample the upgrade button's colour for each business, in place."""
         window = find_window(self.backend, config.window_title, config.window_class, config.title_match)
         if window is None:
             raise CalibrationError(f"Can't find the game window '{config.window_title}'. "
                                    "Start the game first.")
-        self.out(
-            "\nColour sampling. For each business you'll be asked about its current state,\n"
-            "and the bot reads the colour on screen as you answer. So:\n"
-            "  * arrange this console so it does NOT cover the game's buttons;\n"
-            "  * keep the mouse off the game's buttons;\n"
-            "  * answer by what you see right now. Press Enter to skip one.\n"
-            "Lit-up and greyed-out samples are both useful: you can run --calibrate-colors\n"
-            "again later to add whichever state you skipped.")
-        locks = self.yes_no("Did you list any business you haven't unlocked (bought) yet?", False)
+        self.out("This teaches the bot what the upgrade button looks like when you CAN afford it\n"
+                 "(lit up) or CAN'T (greyed out). Without it, the bot just clicks the upgrade\n"
+                 "button every few seconds, which is harmless if the game ignores clicks on\n"
+                 "buttons you can't afford.")
         for b in config.businesses:
-            state, color = self._ask_state(
-                window.handle, config, b.upgrade,
-                f"'{b.name}': is its UPGRADE button lit up (affordable) right now? [y/n, Enter = skip] ")
-            if state is True:
+            lit = self._ask_lit(b.name)
+            if lit is None:
+                continue
+            color = self._capture_color(window.handle, config, b.upgrade)
+            if color is None:
+                continue
+            if lit:
                 b.upgrade_ready_color = color
-            elif state is False:
+            else:
                 b.upgrade_disabled_color = color
             self._warn_if_similar(b.name, "upgrade", b.upgrade_ready_color, b.upgrade_disabled_color)
-            if locks:
-                state, color = self._ask_state(
-                    window.handle, config, b.tile,
-                    f"'{b.name}': is this business unlocked (owned)? [y/n, Enter = skip] ")
-                if state is True:
-                    b.tile_active_color = color
-                elif state is False:
-                    b.tile_locked_color = color
-                self._warn_if_similar(b.name, "tile", b.tile_active_color, b.tile_locked_color)
+            if b.upgrade_ready_color is None or b.upgrade_disabled_color is None:
+                self.out("  Tip: when the button is in its OTHER state (lit up / greyed out),\n"
+                         "  double-click 'Calibrate Colours' to add it. With both, the bot is most\n"
+                         "  reliable.")
 
-    def _ask_state(self, handle: int, config: Config, offset: Point,
-                   question: str) -> Tuple[Optional[bool], Optional[RGB]]:
+    def _ask_lit(self, name: str) -> Optional[bool]:
         while True:
-            answer = self.ask(question).strip().lower()
+            answer = self.ask(f"Look at the game: is the UPGRADE button for '{name}' lit up (affordable)\n"
+                              "right now? [y/n, Enter = skip] ").strip().lower()
             if answer in ("", "s", "skip"):
-                return None, None
-            if answer not in ("y", "yes", "n", "no"):
-                self.out("  Please answer y or n, or press Enter to skip.")
-                continue
-            color = self._sample(handle, config, offset)
-            if color is not None:
-                return answer.startswith("y"), color
+                return None
+            if answer in ("y", "yes", "n", "no"):
+                return answer.startswith("y")
+            self.out("  Please answer y or n, or press Enter to skip.")
 
-    def _sample(self, handle: int, config: Config, offset: Point) -> Optional[RGB]:
+    def _capture_color(self, handle: int, config: Config, offset: Point) -> Optional[RGB]:
+        """Read the button's colour as soon as it's visible: not covered by another window
+        (such as this console) and not under the mouse, which can change its colour."""
+        announced = hover_warned = False
+        for _ in range(round(COLOR_WAIT_SECONDS / COLOR_POLL_SECONDS)):
+            problem, point = self._color_problem(handle, config, offset)
+            if problem is None:
+                self.sleep(COLOR_SETTLE_SECONDS)
+                problem, point = self._color_problem(handle, config, offset)
+                if problem is None:
+                    return self._read_color(point, config, switch_back=announced)
+            if problem == "hover" and not hover_warned:
+                hover_warned = True
+                self.out("  Move the mouse off the upgrade button (its colour can change while the\n"
+                         "  mouse is over it)...")
+            elif problem == "hidden" and not announced:
+                announced = True
+                self.out("  Now click the GAME on the taskbar to bring it to the front, and leave the\n"
+                         "  mouse alone. I'll read the colour as soon as I can see the button...")
+            self.sleep(COLOR_POLL_SECONDS)
+        self.out(f"  Couldn't see the upgrade button for {COLOR_WAIT_SECONDS} seconds, so skipping it.\n"
+                 "  You can add it later by double-clicking 'Calibrate Colours'.")
+        return None
+
+    def _color_problem(self, handle: int, config: Config,
+                       offset: Point) -> Tuple[Optional[str], Optional[Point]]:
         if not self.backend.is_window(handle):
             raise CalibrationError("The game window was closed.")
         client = self.backend.client_rect(handle)
         if self.backend.is_minimized(handle) or client is None:
-            self.out("  The game is minimised. Restore it, then answer again.")
-            return None
+            return "hidden", None
         x, y = to_screen(offset, config.client_size, client)
         if self.backend.window_at(x, y) != handle:
-            self.out("  Another window (maybe this console) covers that button. Move it out of\n"
-                     "  the way, then answer again.")
-            return None
+            return "hidden", None
         cx, cy = self.backend.cursor_pos()
         if abs(cx - x) <= HOVER_MARGIN_PX and abs(cy - y) <= HOVER_MARGIN_PX:
-            self.out("  The mouse is over that button, which can change its colour. Move it\n"
-                     "  away, then answer again.")
-            return None
+            return "hover", None
+        return None, (x, y)
+
+    def _read_color(self, point: Point, config: Config, switch_back: bool) -> Optional[RGB]:
         try:
-            color = self.backend.sample_color(x, y, config.sample_radius)
+            color = self.backend.sample_color(point[0], point[1], config.sample_radius)
         except OSError as e:
-            self.out(f"  Couldn't read the screen ({e}). Answer again to retry.")
+            self.out(f"  Couldn't read the screen ({e}). Skipping; try 'Calibrate Colours' later.")
             return None
-        self.out(f"  Sampled colour {color}.")
+        self.out(f"  Got it: colour {color}.\a" + (" Now click back on this window." if switch_back else ""))
         return color
 
     def _warn_if_similar(self, name: str, what: str, on: Optional[RGB], off: Optional[RGB]) -> None:
@@ -274,11 +262,3 @@ class Calibrator:
                      "  can't tell them apart. The spot you clicked may be on text; re-run --calibrate\n"
                      "  and click a plain part of the button.")
 
-
-def _by_name(config: Optional[Config], name: str) -> Optional[Business]:
-    if config is None:
-        return None
-    for b in config.businesses:
-        if b.name.casefold() == name.casefold():
-            return b
-    return None

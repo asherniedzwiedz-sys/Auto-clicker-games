@@ -6,9 +6,9 @@ and an upgrade/buy button.
 
 While the game is the active window, it:
 
-1. **taps** your top business about 9 times a second, and
+1. **taps** the business you picked about 9 times a second, and
 2. **every 3 seconds** checks whether that business's upgrade button looks
-   affordable and, if so, clicks it. It only upgrades the top business.
+   affordable and, if so, clicks it. It never touches any other business.
 
 It works purely from screen positions and pixel colours, the way a person
 does. It doesn't read game memory, inject DLLs or need admin rights, and it
@@ -55,16 +55,18 @@ python clicker.py --calibrate
 
 It walks you through it:
 
-1. **Click anywhere in the game window** so it learns which window is the game
-   (it saves the window's title and finds it by title from then on).
-2. **List your businesses, highest earner first.** This order is the priority:
-   the bot always works on the first one in the list.
-3. **Click each business tile, then its upgrade button**, in the order shown.
-   Your clicks go through to the game normally.
-4. **(Recommended) Colour sampling.** For each business it asks whether the
-   upgrade button is lit up (affordable) *right now*. It reads the button's
-   colour as you answer. Keep the console from covering the game's buttons,
-   and keep the mouse off them.
+1. **Click on the game itself** (not its taskbar button) so it learns which
+   window is the game. It saves the window's title and finds the game by
+   title from then on. Press Enter to keep the title it found.
+2. **Name the business to tap and upgrade.** Pick your best earner. The name
+   is only a label for you.
+3. **Click that business's tile, then its upgrade button.** Your clicks go
+   through to the game normally.
+4. **(Recommended) The upgrade button's colour.** Answer whether the upgrade
+   button is lit up (affordable) *right now*. If this console is covering the
+   button, click the game on the taskbar to bring it to the front and leave
+   the mouse alone: it reads the colour by itself as soon as the button is
+   visible, then you switch back.
 
 Everything is saved to `config.json`. If one already exists, the old one is
 kept as `config.json.bak`.
@@ -85,16 +87,11 @@ on the game window and let go of the mouse. Clicking starts 3 seconds later.
 
 ## Changing which business it works on
 
-Open `config.json` in Notepad:
+Run **`Calibrate.bat`** again and pick the new business. Your other settings
+are kept.
 
-- **Re-rank** by reordering the entries in `"businesses"`. Highest earner goes first.
-- **Skip** a business by setting `"enabled": false`.
-
-The bot works on the **first enabled business that's available**. If you
-listed businesses you haven't unlocked yet, answer *yes* to "Did you list
-any business you haven't unlocked yet?" during colour sampling. The bot then
-skips businesses whose tile still looks locked, and switches to a better one
-once you buy it.
+(Advanced: `config.json` can list several businesses, best first. The bot
+works on the first one that isn't set to `"enabled": false`.)
 
 ## How "affordable" is detected
 
@@ -107,8 +104,8 @@ over a 7x7 pixel square) with those samples:
 - none recorded: it just clicks the upgrade button every check. That's
   harmless in most games, which ignore clicks on buttons you can't afford.
 
-To add the state you skipped (for example, sample again when a button is
-greyed out), run:
+To add the other state (for example, sample again when the button is
+greyed out), double-click **`Calibrate Colours.bat`**, or run:
 
 ```
 python clicker.py --calibrate-colors
