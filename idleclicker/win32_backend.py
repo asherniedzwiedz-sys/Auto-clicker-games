@@ -133,7 +133,7 @@ def _enable_dpi_awareness() -> None:
 class Win32Backend:
     def __init__(self) -> None:
         _enable_dpi_awareness()
-        self._console = user32.GetConsoleWindow() or 0
+        self._console = kernel32.GetConsoleWindow() or 0
         self._pid = os.getpid()
 
     # ------------------------------------------------------------ windows
