@@ -5,7 +5,8 @@ from idleclicker.backend import Rect
 from idleclicker.bot import Bot
 from idleclicker.config import Business, Config
 
-from .fakes import GAME, GREY, OTHER, FakeBackend, FakeClock
+from .fakes import (GAME, GREY, OTHER, FakeBackend, FakeClock, FakeReader, ImmediateExecutor,
+                    NeverFinishesExecutor)
 
 GREEN = (40, 200, 60)
 RED = (200, 50, 50)
@@ -231,6 +232,102 @@ class UpgradeTests(BotTestCase):
         self.backend.colors[OIL_UPGRADE] = GREEN
         self.run_for(10.0)  # ~1s, ~6s
         self.assertEqual(self.clicks_at(OIL_UPGRADE), 2)
+
+
+class NumberUpgradeTests(BotTestCase):
+    """Upgrading by the "+N" number on the upgrade button."""
+
+    def setUp(self):
+        super().setUp()
+        oil = self.config.businesses[0]
+        oil.number_box = (180, 500, 220, 515)  # screen (280, 550)-(320, 565)
+        oil.upgrade_ready_color = oil.upgrade_disabled_color = None
+        self.config.upgrade_at_plus = 5
+
+    def make_reader_bot(self, *texts, executor=None):
+        self.reader = FakeReader(*texts)
+        return self.make_bot(reader=self.reader, executor=executor or ImmediateExecutor())
+
+    def test_upgrades_when_number_reaches_threshold(self):
+        self.make_reader_bot("+5")
+        self.run_for(2.0)  # first check at ~1s
+        self.assertEqual(self.clicks_at(OIL_UPGRADE), 1)
+        self.assertGreater(self.clicks_at(OIL_TILE), 0)
+
+    def test_does_not_upgrade_below_threshold(self):
+        self.make_reader_bot("+4")
+        self.run_for(10.0)
+        self.assertEqual(self.clicks_at(OIL_UPGRADE), 0)
+        self.assertGreater(self.clicks_at(OIL_TILE), 80)
+        self.assertGreaterEqual(len(self.reader.images), 3)  # it kept checking
+
+    def test_goes_back_to_tapping_after_upgrading(self):
+        # +7 -> upgrade; it drops to +2 -> just tap; later +6 -> upgrade again.
+        self.make_reader_bot("+7", "+2", "+2", "+6", "+1")
+        self.run_for(12.0)
+        clicks = self.backend.clicks
+        upgrades = [i for i, c in enumerate(clicks) if c == OIL_UPGRADE]
+        self.assertEqual(len(upgrades), 2)
+        self.assertTrue(all(clicks[i + 1] == OIL_TILE for i in upgrades))  # straight back to tapping
+        self.assertGreater(self.clicks_at(OIL_TILE), 90)
+
+    def test_checks_again_soon_after_an_upgrade(self):
+        # Still +5 after the first click (one click bought one level): click again ~1s later.
+        self.make_reader_bot("+9", "+5", "+3")
+        self.run_for(3.5)  # checks at ~1s, ~2s, ~3s
+        self.assertEqual(self.clicks_at(OIL_UPGRADE), 2)
+
+    def test_reads_the_marked_box_with_padding(self):
+        self.make_reader_bot("+1")
+        self.run_for(1.5)
+        self.assertEqual(self.backend.grabs[0], (276, 546, 49, 24))  # (280,550)-(320,565) +/- 4px
+
+    def test_threshold_is_configurable(self):
+        self.config.upgrade_at_plus = 10
+        self.make_reader_bot("+9")
+        self.run_for(5.0)
+        self.assertEqual(self.clicks_at(OIL_UPGRADE), 0)
+
+    def test_unreadable_number_never_upgrades_and_warns_once(self):
+        self.make_reader_bot("Level")
+        with self.assertLogs("idleclicker.bot", logging.WARNING) as logs:
+            self.run_for(15.0)
+        self.assertEqual(self.clicks_at(OIL_UPGRADE), 0)
+        self.assertEqual(sum("Can't read the + number" in line for line in logs.output), 1)
+
+    def test_ocr_errors_never_upgrade(self):
+        self.make_reader_bot(RuntimeError("OCR broke"))
+        self.run_for(10.0)
+        self.assertEqual(self.clicks_at(OIL_UPGRADE), 0)
+        self.assertGreater(self.clicks_at(OIL_TILE), 80)
+
+    def test_stuck_reading_is_abandoned_and_engine_restarted(self):
+        self.make_reader_bot("+9", executor=NeverFinishesExecutor())
+        self.run_for(25.0)
+        self.assertEqual(self.clicks_at(OIL_UPGRADE), 0)
+        self.assertEqual(self.reader.closed, 1)
+        self.assertGreater(self.clicks_at(OIL_TILE), 200)  # tapping never stopped
+
+    def test_no_reading_while_number_is_covered(self):
+        self.backend.covered.add((276, 546))
+        self.make_reader_bot("+9")
+        self.run_for(5.0)
+        self.assertEqual(self.backend.grabs, [])
+        self.assertEqual(self.clicks_at(OIL_UPGRADE), 0)
+
+    def test_discards_reading_when_game_loses_focus(self):
+        bot = self.make_bot(reader=FakeReader("+9"), executor=NeverFinishesExecutor())
+        self.run_for(1.5)
+        self.assertIsNotNone(bot._pending_read)
+        self.backend.foreground = OTHER
+        self.run_for(0.5)
+        self.assertIsNone(bot._pending_read)
+
+    def test_without_a_reader_it_never_upgrades(self):
+        with self.assertLogs("idleclicker.bot", logging.WARNING):
+            self.run_for(5.0)
+        self.assertEqual(self.clicks_at(OIL_UPGRADE), 0)
+        self.assertGreater(self.clicks_at(OIL_TILE), 30)
 
 
 class TargetSelectionTests(BotTestCase):

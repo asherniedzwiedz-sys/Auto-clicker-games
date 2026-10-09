@@ -1,4 +1,4 @@
-"""Command line: python clicker.py [--calibrate | --calibrate-colors] [--dry-run] [--ocr] [-v]"""
+"""Command line: python clicker.py [--calibrate | --calibrate-colors | --check] [--dry-run] [-v]"""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from .calibrate import CalibrationError, Calibrator
 from .config import ConfigError, load_config, save_config
 from .ocr import OcrRanker
 from .ranking import PriorityRanker
+from .winocr import WindowsOcr
 
 log = logging.getLogger("idleclicker")
 
@@ -21,14 +22,18 @@ log = logging.getLogger("idleclicker")
 def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="clicker.py",
-        description="Auto-clicker for idle clicker games: taps your top business and buys its "
-                    "upgrades, only while the game is the active window.")
+        description="Auto-clicker for idle clicker games: taps the business you picked and "
+                    "upgrades it when its + number is high enough, only while the game is the "
+                    "active window.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--calibrate", action="store_true",
                       help="walk through clicking each business tile and upgrade button, "
                            "and save their positions to the config file")
     mode.add_argument("--calibrate-colors", action="store_true",
                       help="only re-sample the upgrade/tile colours (keeps positions)")
+    mode.add_argument("--check", action="store_true",
+                      help="show where it taps and upgrades and what + number it reads, "
+                           "without clicking anything")
     parser.add_argument("--config", type=Path, default=Path("config.json"),
                         help="config file to use (default: config.json)")
     parser.add_argument("--dry-run", action="store_true",
@@ -50,16 +55,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(e, file=sys.stderr)
         return 2
 
+    reader = WindowsOcr()  # Windows text recognition; starts only if something reads a number
     try:
         if args.calibrate:
-            Calibrator(backend).calibrate(args.config)
+            Calibrator(backend, reader=reader).calibrate(args.config)
             return 0
 
         config = load_config(args.config)
         if args.calibrate_colors:
-            Calibrator(backend).calibrate_colors(config)
+            Calibrator(backend, reader=reader).calibrate_colors(config)
             save_config(config, args.config)
             print(f"Saved {args.config}.")
+            return 0
+        if args.check:
+            Calibrator(backend, reader=reader).check(config)
             return 0
 
         if not config.businesses:
@@ -71,7 +80,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.ocr:
             log.warning("--ocr isn't implemented yet; using the priority list in %s.", args.config)
             ranker = OcrRanker(backend, fallback=ranker)
-        Bot(config, backend, ranker=ranker, dry_run=args.dry_run).run()
+        Bot(config, backend, ranker=ranker, reader=reader, dry_run=args.dry_run).run()
         return 0
     except ConfigError as e:
         print(f"Config problem: {e}", file=sys.stderr)
@@ -83,3 +92,5 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("\nStopped." if not (args.calibrate or args.calibrate_colors)
               else "\nCancelled; config not changed.")
         return 130
+    finally:
+        reader.cleanup()

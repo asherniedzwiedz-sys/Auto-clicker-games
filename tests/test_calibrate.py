@@ -6,7 +6,9 @@ from idleclicker.backend import Rect, WindowInfo
 from idleclicker.calibrate import CalibrationError, Calibrator
 from idleclicker.config import Business, load_config, save_config
 
-from .fakes import GAME, GREY, FakeBackend
+from idleclicker.winocr import OcrUnavailable
+
+from .fakes import GAME, GREY, OTHER, FakeBackend, FakeReader
 
 GREEN = (40, 200, 60)
 CONSOLE = (1200, 300)  # where the mouse is while typing answers: on the other window
@@ -41,14 +43,14 @@ class CalibrationTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def calibrator(self, answers, sleep=lambda s: None):
+    def calibrator(self, answers, sleep=lambda s: None, reader=None):
         self.io = ScriptedIO(answers)
 
         def ask(prompt):
             self.backend.cursor = CONSOLE  # the user goes to the console to type
             return self.io.ask(prompt)
 
-        return Calibrator(self.backend, ask=ask, out=self.io.out, sleep=sleep)
+        return Calibrator(self.backend, ask=ask, out=self.io.out, sleep=sleep, reader=reader)
 
     def queue_clicks(self, *points):
         for p in points:
@@ -239,6 +241,149 @@ class CalibrationTests(unittest.TestCase):
         del self.backend.windows[GAME]
         with self.assertRaisesRegex(CalibrationError, "Start the game"):
             self.calibrator([]).calibrate_colors(config)
+
+
+def mouse_wanders_off(backend):
+    """A sleep() during which the user moves the mouse away from the game's buttons."""
+    def sleep(seconds):
+        backend.cursor = CONSOLE
+    return sleep
+
+
+class NumberCalibrationTests(CalibrationTests):
+    """Calibrating with the "+N" number on the upgrade button (read by OCR)."""
+
+    # Screen corners of the + number; the game's client area starts at (100, 50).
+    TOP_LEFT, BOTTOM_RIGHT = (330, 560), (360, 575)
+
+    def calibrate_number(self, answers, reader, ctrl_points=(TOP_LEFT, BOTTOM_RIGHT)):
+        self.queue_clicks((500, 300), (150, 560), (350, 580))
+        for point in ctrl_points:
+            self.backend.queue_ctrl_press(*point)
+        cal = self.calibrator(answers, sleep=mouse_wanders_off(self.backend), reader=reader)
+        cal.calibrate(self.path)
+        return load_config(self.path)
+
+    def test_marks_and_confirms_the_number(self):
+        reader = FakeReader("+3")
+        # game? y, title, name, has + number? y, "reads 3, right?" y, threshold Enter = 5
+        config = self.calibrate_number(["y", "", "Oil", "y", "y", ""], reader)
+        oil = config.businesses[0]
+        self.assertEqual(oil.number_box, (230, 510, 260, 525))
+        self.assertEqual(config.upgrade_at_plus, 5)
+        self.assertIsNone(oil.upgrade_ready_color)       # no colour step needed
+        self.assertNotIn("lit up", self.io.text)
+        self.assertIn("It reads 3", self.io.text)
+        self.assertEqual(self.backend.grabs, [(326, 556, 39, 24)])  # the box, padded by 4px
+
+    def test_threshold_can_be_changed(self):
+        config = self.calibrate_number(["y", "", "Oil", "y", "y", "x", "8"], FakeReader("+3"))
+        self.assertIn("whole number", self.io.text)
+        self.assertEqual(config.upgrade_at_plus, 8)
+
+    def test_wrong_reading_lets_you_mark_it_again(self):
+        reader = FakeReader("+2254", "+4")
+        config = self.calibrate_number(
+            ["y", "", "Oil", "y", "n", "y", "y", ""], reader,
+            ctrl_points=[(300, 560), (380, 590), self.TOP_LEFT, self.BOTTOM_RIGHT])
+        self.assertIn("It reads 2254", self.io.text)
+        self.assertIn("It reads 4", self.io.text)
+        self.assertEqual(config.businesses[0].number_box, (230, 510, 260, 525))
+
+    def test_unreadable_number_falls_back_to_colour(self):
+        # "couldn't find a number" -> don't mark again -> colour step (skipped)
+        config = self.calibrate_number(["y", "", "Oil", "y", "n", ""], FakeReader("Level"))
+        self.assertIn("couldn't find a number", self.io.text)
+        self.assertIsNone(config.businesses[0].number_box)
+        self.assertIn("lit up", self.io.text)
+
+    def test_ocr_not_working_falls_back_to_colour(self):
+        reader = FakeReader(OcrUnavailable("Windows text recognition isn't available: no language"))
+        config = self.calibrate_number(["y", "", "Oil", "y", ""], reader)
+        self.assertIn("no language", self.io.text)
+        self.assertIsNone(config.businesses[0].number_box)
+
+    def test_no_number_on_the_button(self):
+        self.queue_clicks((500, 300), (150, 560), (350, 580))
+        self.calibrator(["y", "", "Oil", "n", ""], reader=FakeReader("+1")).calibrate(self.path)
+        self.assertIsNone(load_config(self.path).businesses[0].number_box)
+        self.assertIn("lit up", self.io.text)
+
+    def test_corners_in_the_wrong_order_are_asked_again(self):
+        config = self.calibrate_number(
+            ["y", "", "Oil", "y", "y", ""], FakeReader("+3"),
+            ctrl_points=[self.BOTTOM_RIGHT, self.TOP_LEFT, self.TOP_LEFT, self.BOTTOM_RIGHT])
+        self.assertIn("below and to the right", self.io.text)
+        self.assertEqual(config.businesses[0].number_box, (230, 510, 260, 525))
+
+    def test_pointing_outside_the_game_is_rejected(self):
+        config = self.calibrate_number(
+            ["y", "", "Oil", "y", "y", ""], FakeReader("+3"),
+            ctrl_points=[(1200, 100), self.TOP_LEFT, self.BOTTOM_RIGHT])
+        self.assertIn("wasn't on the game", self.io.text)
+        self.assertEqual(config.businesses[0].number_box, (230, 510, 260, 525))
+
+
+class CheckSetupTests(CalibrationTests):
+    def setUp(self):
+        super().setUp()
+        self.picture = Path(self.tmp.name) / "number_check.bmp"
+
+    def make_config(self, box=True):
+        reader = FakeReader("+3")
+        self.queue_clicks((500, 300), (150, 560), (350, 580))
+        if box:
+            self.backend.queue_ctrl_press(330, 560)
+            self.backend.queue_ctrl_press(360, 575)
+        cal = self.calibrator(["y", "", "Oil", "y" if box else "n", "y" if box else "", ""],
+                              sleep=mouse_wanders_off(self.backend), reader=reader)
+        cal.calibrate(self.path)
+        self.backend.grabs.clear()
+        return load_config(self.path)
+
+    def check(self, config, reader, foreground_after=0):
+        polls = []
+
+        def sleep(seconds):
+            polls.append(seconds)
+            if len(polls) >= foreground_after:
+                self.backend.foreground = GAME
+
+        self.backend.foreground = OTHER
+        self.io = ScriptedIO([])
+        Calibrator(self.backend, ask=self.io.ask, out=self.io.out, sleep=sleep,
+                   reader=reader).check(config, picture=self.picture)
+
+    def test_points_at_both_spots_without_clicking_and_reads_the_number(self):
+        config = self.make_config()
+        clicks_before = list(self.backend.clicks)
+        self.check(config, FakeReader("+6"), foreground_after=3)
+        self.assertEqual(self.backend.clicks, clicks_before)            # nothing clicked
+        self.assertEqual(self.backend.moves[:2], [(150, 560), (350, 580)])  # tap spot, upgrade
+        self.assertIn("reads 6, so right now it WOULD upgrade", self.io.text)
+        self.assertTrue(self.picture.read_bytes().startswith(b"BM"))
+
+    def test_below_threshold_keeps_tapping(self):
+        self.check(self.make_config(), FakeReader("+2"))
+        self.assertIn("reads 2, so right now it would keep tapping", self.io.text)
+
+    def test_unreadable(self):
+        self.check(self.make_config(), FakeReader("Level"))
+        self.assertIn("can't find a number", self.io.text)
+
+    def test_stops_if_game_never_comes_to_the_front(self):
+        config = self.make_config()
+        self.check(config, FakeReader("+6"), foreground_after=10 ** 6)
+        self.assertIn("didn't come to the front", self.io.text)
+        self.assertEqual(self.backend.moves, [])
+
+    def test_colour_setup(self):
+        self.backend.colors[UPGRADE] = GREEN
+        self.queue_clicks((500, 300), (150, 560), (350, 580))
+        self.calibrator(["y", "", "Oil", "y"]).calibrate(self.path)  # no reader: colour step
+        self.check(load_config(self.path), None)
+        self.assertIn("looks affordable", self.io.text)
+
 
 if __name__ == "__main__":
     unittest.main()

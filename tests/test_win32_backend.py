@@ -198,6 +198,19 @@ class Win32BackendTests(unittest.TestCase):
         self.backend.click(10, 20, 0)
         self.assertEqual(self.api.sent_flags, [0x0008, 0x0010])  # RIGHTDOWN, RIGHTUP
 
+    def test_move_cursor_does_not_click(self):
+        self.backend.move_cursor(30, 40)
+        self.assertEqual(self.called("user32.SetCursorPos"), [(30, 40)])
+        self.assertEqual(self.api.sent_flags, [])
+
+    def test_grab_copies_the_rectangle(self):
+        image = self.backend.grab(200, 300, 4, 2)
+        (args,) = self.called("gdi32.BitBlt")
+        self.assertEqual(args[1:5] + args[6:8], (0, 0, 4, 2, 200, 300))
+        self.assertEqual((image.width, image.height, len(image.bgra)), (4, 2, 32))
+        self.assertEqual(image.pixel(0, 0), (30, 20, 10))
+        self.assertEqual(image.pixel(1, 0), (70, 60, 50))
+
     def test_sample_color_averages_pixels_as_rgb(self):
         # 7x7 = 49 pixels: 25 of RGB(30, 20, 10) and 24 of RGB(70, 60, 50).
         expected = tuple(round((25 * a + 24 * b) / 49) for a, b in ((30, 70), (20, 60), (10, 50)))

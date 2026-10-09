@@ -1,6 +1,8 @@
 from collections import deque
 
-from idleclicker.backend import Rect, WindowInfo
+from concurrent.futures import Future
+
+from idleclicker.backend import Image, Rect, WindowInfo
 
 GAME = 1
 OTHER = 2
@@ -36,6 +38,9 @@ class FakeBackend:
         self.colors = {}              # screen point -> RGB
         self.keys_down = set()
         self.mouse_events = deque()   # scripted (down, pos) for calibration
+        self.ctrl_events = deque()    # scripted Ctrl (down, pos) for calibration
+        self.grabs = []               # (left, top, width, height) of every screen capture
+        self.moves = []               # (x, y) of every mouse move without a click
         self.refuse_clicks = False
 
     # --- windows
@@ -79,8 +84,25 @@ class FakeBackend:
     def queue_click(self, x, y):
         self.mouse_events.extend([(False, (x, y)), (True, (x, y)), (False, (x, y))])
 
+    def queue_ctrl_press(self, x, y):
+        self.ctrl_events.extend([(False, (x, y)), (True, (x, y)), (False, (x, y))])
+
     def is_key_down(self, key):
+        if key == "CTRL" and key not in self.keys_down:
+            if not self.ctrl_events:
+                raise RuntimeError("test ran out of scripted Ctrl presses")
+            down, pos = self.ctrl_events.popleft()
+            self.cursor = pos
+            return down
         return key in self.keys_down
+
+    def move_cursor(self, x, y):
+        self.cursor = (x, y)
+        self.moves.append((x, y))
+
+    def grab(self, left, top, width, height):
+        self.grabs.append((left, top, width, height))
+        return Image(width, height, bytes(width * height * 4))
 
     def click(self, x, y, hold_seconds):
         if self.refuse_clicks:
@@ -94,3 +116,47 @@ class FakeBackend:
 
     def sample_color(self, x, y, radius):
         return self.colors.get((x, y), GREY)
+
+
+class FakeReader:
+    """Stands in for Windows OCR: returns the scripted texts in order (the last one repeats)."""
+
+    def __init__(self, *texts):
+        self.texts = list(texts)
+        self.images = []
+        self.closed = 0
+
+    def read(self, image):
+        self.images.append(image)
+        text = self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
+        if isinstance(text, Exception):
+            raise text
+        return text
+
+    def close(self):
+        self.closed += 1
+
+
+class ImmediateExecutor:
+    """Runs submitted work straight away, so tests don't depend on thread timing."""
+
+    def submit(self, fn, *args):
+        future = Future()
+        try:
+            future.set_result(fn(*args))
+        except Exception as e:
+            future.set_exception(e)
+        return future
+
+    def shutdown(self, wait=True):
+        pass
+
+
+class NeverFinishesExecutor:
+    """Work that never completes, like a stuck OCR engine."""
+
+    def submit(self, fn, *args):
+        return Future()
+
+    def shutdown(self, wait=True):
+        pass

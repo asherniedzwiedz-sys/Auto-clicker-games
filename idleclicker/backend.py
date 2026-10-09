@@ -37,6 +37,18 @@ class Rect:
 
 
 @dataclass(frozen=True)
+class Image:
+    """A screen capture: rows top to bottom, 4 bytes per pixel in B, G, R, unused order."""
+    width: int
+    height: int
+    bgra: bytes
+
+    def pixel(self, x: int, y: int) -> RGB:
+        i = 4 * (y * self.width + x)
+        return self.bgra[i + 2], self.bgra[i + 1], self.bgra[i]
+
+
+@dataclass(frozen=True)
 class WindowInfo:
     handle: int
     title: str
@@ -46,7 +58,7 @@ class WindowInfo:
 # Names accepted for the pause/quit hotkeys, mapped to Windows virtual-key codes.
 KEY_CODES = {f"F{n}": 0x6F + n for n in range(1, 25)}
 KEY_CODES.update({
-    "ESC": 0x1B, "PAUSE": 0x13, "SCROLLLOCK": 0x91, "INSERT": 0x2D,
+    "CTRL": 0x11, "ESC": 0x1B, "PAUSE": 0x13, "SCROLLLOCK": 0x91, "INSERT": 0x2D,
     "DELETE": 0x2E, "HOME": 0x24, "END": 0x23, "PAGEUP": 0x21, "PAGEDOWN": 0x22,
 })
 KEY_CODES.update({c: ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"})
@@ -80,6 +92,12 @@ class Backend(Protocol):
 
     def click(self, x: int, y: int, hold_seconds: float) -> bool:
         """Move to (x, y) and click the primary button. False if Windows refused."""
+
+    def move_cursor(self, x: int, y: int) -> None:
+        """Move the mouse pointer without clicking."""
+
+    def grab(self, left: int, top: int, width: int, height: int) -> Image:
+        """Copy a rectangle of the screen."""
 
     def sample_color(self, x: int, y: int, radius: int) -> RGB:
         """Average colour of the (2*radius+1)^2 pixel square centred on (x, y)."""

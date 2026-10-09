@@ -6,8 +6,8 @@ from pathlib import Path
 
 from idleclicker.backend import Rect
 from idleclicker.colors import looks_on
-from idleclicker.config import (Business, Config, ConfigError, config_from_dict, config_to_dict,
-                                load_config, save_config, to_screen)
+from idleclicker.config import (Business, Config, ConfigError, box_to_screen, config_from_dict,
+                                config_to_dict, load_config, save_config, to_screen)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -85,6 +85,20 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(data=data), self.assertRaises(ConfigError):
                 config_from_dict(data)
 
+    def test_number_box_and_threshold(self):
+        oil = {"name": "Oil", "tile": [10, 20], "upgrade": [30, 40], "number_box": [25, 30, 45, 38]}
+        config = config_from_dict(minimal(businesses=[oil], upgrade_at_plus=7))
+        self.assertEqual(config.businesses[0].number_box, (25, 30, 45, 38))
+        self.assertEqual(config.upgrade_at_plus, 7)
+        self.assertEqual(config_from_dict(config_to_dict(config)), config)
+        self.assertEqual(config_from_dict(minimal()).upgrade_at_plus, 5)
+        for bad_box in ([25, 30, 45], [45, 30, 25, 38], [25, 30, 900, 38], [1, 2, 3, "4"]):
+            with self.subTest(box=bad_box), self.assertRaises(ConfigError):
+                config_from_dict(minimal(businesses=[dict(oil, number_box=bad_box)]))
+        for bad in (0, -1, 2.5, "5", True):
+            with self.subTest(upgrade_at_plus=bad), self.assertRaises(ConfigError):
+                config_from_dict(minimal(upgrade_at_plus=bad))
+
     def test_key_names_are_case_insensitive(self):
         self.assertEqual(config_from_dict(minimal(pause_key="f6")).pause_key, "F6")
 
@@ -115,6 +129,11 @@ class ToScreenTests(unittest.TestCase):
 
     def test_clamped_inside_client_area(self):
         self.assertEqual(to_screen((799, 599), (800, 600), Rect(0, 0, 400, 300)), (399, 299))
+
+    def test_box_padding_stays_inside_client_area(self):
+        client = Rect(100, 50, 800, 600)
+        self.assertEqual(box_to_screen((10, 20, 30, 40), (800, 600), client, 4), (106, 66, 134, 94))
+        self.assertEqual(box_to_screen((0, 0, 799, 599), (800, 600), client, 4), (100, 50, 899, 649))
 
 
 class ColorTests(unittest.TestCase):

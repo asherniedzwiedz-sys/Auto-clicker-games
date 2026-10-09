@@ -15,7 +15,7 @@ import time
 from ctypes import wintypes
 from typing import List, Optional
 
-from .backend import KEY_CODES, RGB, Point, Rect, WindowInfo
+from .backend import KEY_CODES, RGB, Image, Point, Rect, WindowInfo
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -244,33 +244,34 @@ class Win32Backend:
 
     # ------------------------------------------------------------ pixels
 
-    def sample_color(self, x: int, y: int, radius: int) -> RGB:
-        size = 2 * radius + 1
-        buf = (ctypes.c_ubyte * (size * size * 4))()
+    def move_cursor(self, x: int, y: int) -> None:
+        user32.SetCursorPos(x, y)
+
+    def grab(self, left: int, top: int, width: int, height: int) -> Image:
+        buf = (ctypes.c_ubyte * (width * height * 4))()
         screen_dc = user32.GetDC(None)
         if not screen_dc:
             raise OSError("GetDC failed")
         try:
             mem_dc = gdi32.CreateCompatibleDC(screen_dc)
             try:
-                bitmap = gdi32.CreateCompatibleBitmap(screen_dc, size, size)
+                bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
                 try:
                     previous = gdi32.SelectObject(mem_dc, bitmap)
-                    copied = gdi32.BitBlt(mem_dc, 0, 0, size, size, screen_dc,
-                                          x - radius, y - radius, SRCCOPY)
+                    copied = gdi32.BitBlt(mem_dc, 0, 0, width, height, screen_dc, left, top, SRCCOPY)
                     gdi32.SelectObject(mem_dc, previous)  # GetDIBits needs it deselected
                     if not copied:
                         raise OSError("BitBlt failed")
                     info = BITMAPINFO()
                     header = info.bmiHeader
                     header.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-                    header.biWidth = size
-                    header.biHeight = -size  # top-down rows
+                    header.biWidth = width
+                    header.biHeight = -height  # top-down rows
                     header.biPlanes = 1
                     header.biBitCount = 32
                     header.biCompression = BI_RGB
-                    if gdi32.GetDIBits(mem_dc, bitmap, 0, size, buf, ctypes.byref(info),
-                                       DIB_RGB_COLORS) != size:
+                    if gdi32.GetDIBits(mem_dc, bitmap, 0, height, buf, ctypes.byref(info),
+                                       DIB_RGB_COLORS) != height:
                         raise OSError("GetDIBits failed")
                 finally:
                     gdi32.DeleteObject(bitmap)
@@ -278,6 +279,11 @@ class Win32Backend:
                 gdi32.DeleteDC(mem_dc)
         finally:
             user32.ReleaseDC(None, screen_dc)
+        return Image(width, height, bytes(buf))
+
+    def sample_color(self, x: int, y: int, radius: int) -> RGB:
+        size = 2 * radius + 1
+        image = self.grab(x - radius, y - radius, size, size)
         n = size * size
-        # Pixels are stored as B, G, R, unused.
-        return (round(sum(buf[2::4]) / n), round(sum(buf[1::4]) / n), round(sum(buf[0::4]) / n))
+        data = image.bgra  # B, G, R, unused
+        return (round(sum(data[2::4]) / n), round(sum(data[1::4]) / n), round(sum(data[0::4]) / n))

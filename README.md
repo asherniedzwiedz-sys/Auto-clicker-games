@@ -7,12 +7,14 @@ and an upgrade/buy button.
 While the game is the active window, it:
 
 1. **taps** the business you picked about 9 times a second, and
-2. **every 3 seconds** checks whether that business's upgrade button looks
-   affordable and, if so, clicks it. It never touches any other business.
+2. **every 3 seconds** reads the **+ number** on that business's upgrade
+   button (like `+3`). When it's **5 or more**, it clicks upgrade once, then
+   goes straight back to tapping. It never touches any other business.
 
-It works purely from screen positions and pixel colours, the way a person
-does. It doesn't read game memory, inject DLLs or need admin rights, and it
-has no dependencies beyond Python's standard library.
+It works purely from what's on screen, the way a person does: positions,
+colours, and Windows' built-in text recognition to read the + number. It
+doesn't read game memory, inject DLLs or need admin rights, and there's
+nothing to install except Python.
 
 ## Safety: it never clicks anywhere else
 
@@ -62,23 +64,30 @@ It walks you through it:
    is only a label for you.
 3. **Click that business's tile, then its upgrade button.** Your clicks go
    through to the game normally.
-4. **(Recommended) The upgrade button's colour.** Answer whether the upgrade
-   button is lit up (affordable) *right now*. If this console is covering the
-   button, click the game on the taskbar to bring it to the front and leave
-   the mouse alone: it reads the colour by itself as soon as the button is
-   visible, then you switch back.
+4. **Mark the + number** on the upgrade button: point the mouse (don't click)
+   at its top-left corner and press **Ctrl**, then at its bottom-right corner
+   and press **Ctrl**. Mark just the `+` and its digits.
+5. **Check the reading.** It reads the number back to you; say whether it's
+   right. If this console is covering the number, click the game on the
+   taskbar to bring it to the front and leave the mouse alone: it reads it
+   as soon as it's visible, then you switch back.
+6. **Pick when to upgrade:** press Enter for 5, or type another number.
+
+If the game's upgrade button has no + number, answer *no* when asked, and it
+goes by the button's colour instead (see below).
 
 Everything is saved to `config.json`. If one already exists, the old one is
 kept as `config.json.bak`.
 
-## 2. Test without clicking
+## 2. Check it (nothing gets clicked)
 
-```
-python clicker.py --dry-run -v
-```
+Double-click **`Check Setup.bat`**, then click on the game and let go of the
+mouse. The pointer moves to the spot it will **tap**, then to the **upgrade**
+button, and it tells you what + number it reads and whether it would upgrade
+right now. The picture it read is saved as `number_check.bmp`.
 
-This does everything except click, and logs what it would click and the
-colours it sees.
+For a longer test, `python clicker.py --dry-run -v` does everything except
+click and logs each decision.
 
 ## 3. Run
 
@@ -93,11 +102,19 @@ are kept.
 (Advanced: `config.json` can list several businesses, best first. The bot
 works on the first one that isn't set to `"enabled": false`.)
 
-## How "affordable" is detected
+## How it decides when to upgrade
 
-During colour sampling you record what a button looks like **lit up** and/or
-**greyed out**. At run time it compares the button's current colour (averaged
-over a 7x7 pixel square) with those samples:
+**With the + number** (the normal way): every 3 seconds it takes a small
+screenshot of the box you marked and reads it with Windows' built-in text
+recognition (through Windows PowerShell, which comes with Windows). If the
+number is at least `upgrade_at_plus` (5 unless you chose another), it clicks
+upgrade once, looks again a second later, and otherwise keeps tapping. If it
+can't read a number, it doesn't upgrade, and after a few tries it says so.
+
+**Without a + number**, it goes by the button's colour. During colour sampling
+you record what the button looks like **lit up** and/or **greyed out**. At run
+time it compares the button's current colour (averaged over a 7x7 pixel
+square) with those samples:
 
 - both samples recorded: whichever is closer wins (most reliable);
 - only one recorded: it uses `color_tolerance` to decide;
@@ -127,6 +144,7 @@ This keeps your positions and any existing samples.
 | `color_tolerance` | `40` | How close a colour must be to a single sample (0–442) |
 | `sample_radius` | `3` | Colour is averaged over a (2r+1)² square |
 | `user_pause_seconds` | `3` | Mouse must be still this long before clicking (re)starts |
+| `upgrade_at_plus` | `5` | Click upgrade when the + number is at least this |
 | `pause_key` / `quit_key` | `F8` / `F9` | Hotkeys (F1–F24, letters, digits, PAUSE, ...) |
 
 Positions are pixel offsets from the top-left corner of the game's inner
@@ -135,8 +153,8 @@ for a full example.
 
 ## `--ocr` (not implemented yet)
 
-`--ocr` is reserved for ranking businesses by reading their income off the
-screen. For now it only prints a notice and uses the priority list. The stub
+Separate from the + number: `--ocr` is reserved for ranking businesses by
+reading their income off the screen. For now it only prints a notice and uses the priority list. The stub
 is in `idleclicker/ocr.py`.
 
 ## Troubleshooting
@@ -150,8 +168,13 @@ is in `idleclicker/ocr.py`.
 - **"Windows refused to send the click"**: the game runs as administrator.
   Windows blocks normal programs from clicking into elevated ones. Run the
   game normally instead.
-- **It never buys upgrades / always clicks them**: run `--dry-run -v` to see
-  the colours it reads, then `--calibrate-colors`. If the lit and greyed
+- **It taps or upgrades in the wrong place**: run `Check Setup.bat` to see
+  exactly where it taps and upgrades, and recalibrate if either is off.
+- **It never upgrades**: run `Check Setup.bat` to see what + number it reads.
+  If it can't read it, recalibrate and mark the box a little bigger around
+  the `+` and digits (but not other text). The picture it read is saved as
+  `number_check.bmp`. Without a + number box: run `--dry-run -v` to see the
+  colours it reads, then `Calibrate Colours.bat`. If the lit and greyed
   samples are almost identical, you probably clicked on text. Recalibrate and
   click a plain part of the button.
 - **It keeps saying it's waiting for the mouse**: something keeps moving the

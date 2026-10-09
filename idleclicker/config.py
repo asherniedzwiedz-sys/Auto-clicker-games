@@ -22,6 +22,8 @@ from .backend import KEY_CODES, RGB, Point, Rect
 
 log = logging.getLogger(__name__)
 
+Box = Tuple[int, int, int, int]
+
 
 class ConfigError(ValueError):
     pass
@@ -37,6 +39,8 @@ class Business:
     upgrade_disabled_color: Optional[RGB] = None
     tile_active_color: Optional[RGB] = None
     tile_locked_color: Optional[RGB] = None
+    # The "+N" text on the upgrade button: left, top, right, bottom offsets, like tile/upgrade.
+    number_box: Optional[Box] = None
 
     @property
     def has_upgrade_colors(self) -> bool:
@@ -60,6 +64,7 @@ class Config:
     color_tolerance: float = 40.0
     sample_radius: int = 3
     user_pause_seconds: float = 3.0
+    upgrade_at_plus: int = 5
     pause_key: str = "F8"
     quit_key: str = "F9"
 
@@ -72,6 +77,16 @@ def to_screen(offset: Point, client_size: Tuple[int, int], client: Rect) -> Poin
     x = min(max(x, 0), client.width - 1)
     y = min(max(y, 0), client.height - 1)
     return client.left + x, client.top + y
+
+
+def box_to_screen(box: Box, client_size: Tuple[int, int], client: Rect, pad: int = 0) -> Box:
+    """A calibrated box as screen left, top, right, bottom (inclusive), grown by ``pad``
+    pixels on each side but kept inside the client area."""
+    left, top = to_screen(box[:2], client_size, client)
+    right, bottom = to_screen(box[2:], client_size, client)
+    return (max(client.left, left - pad), max(client.top, top - pad),
+            min(client.left + client.width - 1, right + pad),
+            min(client.top + client.height - 1, bottom + pad))
 
 
 # ---------------------------------------------------------------- loading
@@ -90,6 +105,17 @@ def _color(value: Any, where: str) -> Optional[RGB]:
             or not all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 255 for v in value)):
         raise ConfigError(f"{where} must be [r, g, b] (0-255 each) or null, got {value!r}")
     return int(value[0]), int(value[1]), int(value[2])
+
+
+def _box(value: Any, where: str) -> Optional[Box]:
+    if value is None:
+        return None
+    if (not isinstance(value, (list, tuple)) or len(value) != 4
+            or not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in value)
+            or value[2] <= value[0] or value[3] <= value[1]):
+        raise ConfigError(f"{where} must be [left, top, right, bottom] with right > left and "
+                          f"bottom > top, or null, got {value!r}")
+    return int(value[0]), int(value[1]), int(value[2]), int(value[3])
 
 
 def _number(data: Dict[str, Any], key: str, default: float, lo: float, hi: float) -> float:
@@ -130,6 +156,7 @@ def _business(data: Any, index: int) -> Business:
         upgrade_disabled_color=_color(data.get("upgrade_disabled_color"), f"{where}.upgrade_disabled_color"),
         tile_active_color=_color(data.get("tile_active_color"), f"{where}.tile_active_color"),
         tile_locked_color=_color(data.get("tile_locked_color"), f"{where}.tile_locked_color"),
+        number_box=_box(data.get("number_box"), f"{where}.number_box"),
     )
 
 
@@ -163,6 +190,9 @@ def config_from_dict(data: Any) -> Config:
             if x >= size[0] or y >= size[1]:
                 raise ConfigError(f"business {b.name!r} {key} {[x, y]} is outside the "
                                   f"calibrated window size {list(size)}")
+        if b.number_box is not None and (b.number_box[2] >= size[0] or b.number_box[3] >= size[1]):
+            raise ConfigError(f"business {b.name!r} number_box {list(b.number_box)} is outside the "
+                              f"calibrated window size {list(size)}")
 
     keys = {}
     for key, default in (("pause_key", "F8"), ("quit_key", "F9")):
@@ -172,6 +202,10 @@ def config_from_dict(data: Any) -> Config:
         keys[key] = value.upper()
     if keys["pause_key"] == keys["quit_key"]:
         raise ConfigError("pause_key and quit_key must be different keys")
+
+    at_plus = data.get("upgrade_at_plus", 5)
+    if not isinstance(at_plus, int) or isinstance(at_plus, bool) or at_plus < 1:
+        raise ConfigError(f"upgrade_at_plus must be a whole number of at least 1, got {at_plus!r}")
 
     radius = data.get("sample_radius", 3)
     if not isinstance(radius, int) or isinstance(radius, bool) or not 0 <= radius <= 10:
@@ -189,6 +223,7 @@ def config_from_dict(data: Any) -> Config:
         color_tolerance=_number(data, "color_tolerance", 40.0, 1, 442),
         sample_radius=radius,
         user_pause_seconds=_number(data, "user_pause_seconds", 3.0, 0, 60),
+        upgrade_at_plus=at_plus,
         pause_key=keys["pause_key"],
         quit_key=keys["quit_key"],
     )
@@ -219,6 +254,7 @@ def config_to_dict(config: Config) -> Dict[str, Any]:
             "upgrade_disabled_color": list(b.upgrade_disabled_color) if b.upgrade_disabled_color else None,
             "tile_active_color": list(b.tile_active_color) if b.tile_active_color else None,
             "tile_locked_color": list(b.tile_locked_color) if b.tile_locked_color else None,
+            "number_box": list(b.number_box) if b.number_box else None,
         }
 
     return {
@@ -232,6 +268,7 @@ def config_to_dict(config: Config) -> Dict[str, Any]:
         "color_tolerance": config.color_tolerance,
         "sample_radius": config.sample_radius,
         "user_pause_seconds": config.user_pause_seconds,
+        "upgrade_at_plus": config.upgrade_at_plus,
         "pause_key": config.pause_key,
         "quit_key": config.quit_key,
         "_businesses": "Highest earner FIRST. The bot works on the first enabled, unlocked one.",

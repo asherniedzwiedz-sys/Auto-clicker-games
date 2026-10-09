@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Optional, Tuple
 
 from .backend import Backend, Point, Rect, find_window
 from .colors import looks_on
-from .config import Business, Config, to_screen
+from .config import Business, Config, box_to_screen, to_screen
 from .ranking import PriorityRanker
+from .winocr import parse_plus_number
 
 log = logging.getLogger(__name__)
 
@@ -31,12 +33,20 @@ class Bot:
     WINDOW_SEARCH_SECONDS = 2.0
     POLL_SECONDS = 0.015
     MOUSE_SLOP_PX = 3
+    NUMBER_BOX_PADDING_PX = 4
+    READ_TIMEOUT_SECONDS = 20.0
+    READ_FAILURES_BEFORE_WARNING = 3
 
-    def __init__(self, config: Config, backend: Backend, *, ranker=None, dry_run: bool = False,
-                 clock=time.monotonic, sleep=time.sleep) -> None:
+    def __init__(self, config: Config, backend: Backend, *, ranker=None, reader=None,
+                 executor=None, dry_run: bool = False, clock=time.monotonic,
+                 sleep=time.sleep) -> None:
         self.config = config
         self.backend = backend
         self.ranker = ranker or PriorityRanker()
+        # Reads the "+N" number (winocr.WindowsOcr). Reads run on a worker thread so
+        # tapping doesn't pause while Windows recognises the text.
+        self.reader = reader
+        self._executor = executor
         self.dry_run = dry_run
         self.clock = clock
         self.sleep = sleep
@@ -61,6 +71,9 @@ class Bot:
         self._keys_held = set()
         self._warned_blocked = False
         self._warned_size: Optional[Tuple[int, int]] = None
+        self._pending_read: Optional[Tuple[Business, float, Future]] = None
+        self._read_failures = 0
+        self._warned_no_reader = False
 
     # ------------------------------------------------------------ loop
 
@@ -72,6 +85,8 @@ class Bot:
                 self.tick()
                 self._wait_until(deadline)
         finally:
+            if self._executor is not None:
+                self._executor.shutdown(wait=False)
             log.info("Stopped after %d taps and %d upgrade clicks.", self.taps, self.upgrade_clicks)
 
     def _wait_until(self, deadline: float) -> None:
@@ -116,6 +131,8 @@ class Bot:
                                           f"{cfg.user_pause_seconds:g}s before clicking...")
             return
 
+        if self._use_number_reading(handle, client, now):
+            return
         if self._state not in ACTIVE_STATES:
             # (Re)starting. The first upgrade check waits a moment so the first taps
             # have parked the cursor on the tile, away from the upgrade button.
@@ -124,8 +141,11 @@ class Bot:
         elif now >= self._next_check:
             self._next_check = now + cfg.upgrade_check_seconds
             self.target = self._choose_target(client)
-            if self.target is not None and self._maybe_buy_upgrade(handle, client):
-                return
+            if self.target is not None:
+                if self.target.number_box is not None:
+                    self._start_number_reading(handle, client, now)
+                elif self._maybe_buy_upgrade(handle, client):
+                    return
 
         if self.target is None:
             self._set_status("no-target", "No business to click: all are disabled or look locked.")
@@ -194,6 +214,7 @@ class Bot:
     def _lose_focus(self) -> None:
         self._had_focus = False
         self._expected_cursor = None
+        self._pending_read = None  # don't act on a number read before the break
 
     def _hands_off(self, now: float, pos: Point) -> None:
         self._hands_off_until = now + self.config.user_pause_seconds
@@ -262,6 +283,79 @@ class Bot:
             log.debug("Clicked the upgrade button for '%s'.", business.name)
         return True
 
+    # ------------------------------------------------------------ the "+N" number
+
+    def _start_number_reading(self, handle: int, client: Rect, now: float) -> None:
+        """Capture the target's "+N" number and start reading it in the background."""
+        business = self.target
+        if self.reader is None:
+            if not self._warned_no_reader:
+                self._warned_no_reader = True
+                log.warning("Can't read the + number (Windows text recognition isn't available), "
+                            "so not upgrading.")
+            return
+        if self._pending_read is not None:
+            return
+        left, top, right, bottom = box_to_screen(business.number_box, self.config.client_size,
+                                                 client, self.NUMBER_BOX_PADDING_PX)
+        if any(self.backend.window_at(x, y) != handle for x, y in ((left, top), (right, bottom))):
+            log.debug("Something is covering the + number; skipping this check.")
+            return
+        try:
+            image = self.backend.grab(left, top, right - left + 1, bottom - top + 1)
+        except OSError as e:
+            log.warning("Couldn't capture the + number: %s", e)
+            return
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr")
+        self._pending_read = (business, now, self._executor.submit(self.reader.read, image))
+
+    def _use_number_reading(self, handle: int, client: Rect, now: float) -> bool:
+        """Act on a finished reading: upgrade if the number is high enough. True if clicked."""
+        if self._pending_read is None:
+            return False
+        business, started, future = self._pending_read
+        if not future.done():
+            if now - started > self.READ_TIMEOUT_SECONDS:
+                self._pending_read = None
+                self._reading_failed("Windows took too long to read it")
+                close = getattr(self.reader, "close", None)
+                if close is not None:
+                    close()  # unsticks the worker; the next read restarts the engine
+            return False
+        self._pending_read = None
+        try:
+            text = future.result()
+        except Exception as e:  # anything the OCR engine raises
+            self._reading_failed(str(e))
+            return False
+        value = parse_plus_number(text)
+        if value is None:
+            self._reading_failed(f"it saw {text!r}")
+            return False
+        if self._read_failures >= self.READ_FAILURES_BEFORE_WARNING:
+            log.info("Reading the + number works again.")
+        self._read_failures = 0
+        threshold = self.config.upgrade_at_plus
+        log.debug("'%s': the + number reads %r -> %d", business.name, text, value)
+        if business is not self.target or value < threshold:
+            return False
+        if not self._click(handle, client, business.upgrade):
+            return False
+        self.upgrade_clicks += 1
+        log.info("'%s': the + number was %d (%d or more), so clicked upgrade.",
+                 business.name, value, threshold)
+        # Look again soon: if one click buys one level, it may still be high enough.
+        self._next_check = now + min(1.0, self.config.upgrade_check_seconds)
+        return True
+
+    def _reading_failed(self, reason: str) -> None:
+        self._read_failures += 1
+        log.debug("Couldn't read the + number: %s", reason)
+        if self._read_failures == self.READ_FAILURES_BEFORE_WARNING:
+            log.warning("Can't read the + number on the upgrade button (%s), so not upgrading "
+                        "for now. Run 'Check Setup' to see what it reads.", reason)
+
     # ------------------------------------------------------------ clicking
 
     def _click(self, handle: int, client: Rect, offset: Point) -> bool:
@@ -303,6 +397,8 @@ class Bot:
             notes = []
             if not b.enabled:
                 notes.append("disabled")
+            elif b.number_box is not None:
+                notes.append(f"upgrades when its + number is {cfg.upgrade_at_plus} or more")
             elif not b.has_upgrade_colors:
                 notes.append("no upgrade colours sampled: its upgrade button is just clicked "
                              f"every {cfg.upgrade_check_seconds:g}s")
